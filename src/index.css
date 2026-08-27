@@ -1,0 +1,16 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html, body, #root { height: 100%; }
+  body { @apply bg-slate-50 text-slate-900 antialiased; }
+}
+
+@layer utilities {
+  /* diff rows */
+  .diff-add { @apply bg-emerald-50 text-emerald-900; }
+  .diff-del { @apply bg-rose-50 text-rose-900; }
+  .diff-ctx { @apply bg-white text-slate-700; }
+  .diff-gutter { @apply select-none border-r border-slate-200 bg-slate-50 px-2 text-right text-xs text-slate-400; }
+}
