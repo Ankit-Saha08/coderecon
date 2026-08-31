@@ -1,4 +1,6 @@
 import type { FileEntry, Side } from '@/types';
+import { composeMerge, diffKey, getExactDiff, wantsTrailingNewline } from './diff';
+import { canHunkMerge } from './mergeable';
 
 export interface OutputFile {
   path: string;                 // final path inside the merged tree
@@ -8,7 +10,7 @@ export interface OutputFile {
   renamed: boolean;
   size: number;
   raw?: File;                   // byte-exact passthrough (preferred)
-  bytes?: Uint8Array;           // synthesized content
+  bytes?: Uint8Array;           // synthesized content (hunk merge / manual)
 }
 
 export interface ExcludedFile {
@@ -30,10 +32,10 @@ export interface AssemblyPlan {
 
 /**
  * Insert a suffix before the final extension.
- *   utils/date.ts        + .incoming -> utils/date.incoming.ts
- *   utils/a.test.ts      + .incoming -> utils/a.test.incoming.ts
- *   .env                 + .incoming -> .env.incoming      (leading dot is not an ext)
- *   Makefile             + .incoming -> Makefile.incoming
+ *   utils/date.ts   + .incoming -> utils/date.incoming.ts
+ *   a.test.ts       + .incoming -> a.test.incoming.ts
+ *   .env            + .incoming -> .env.incoming      (leading dot is not an ext)
+ *   Makefile        + .incoming -> Makefile.incoming
  */
 export function insertSuffix(path: string, suffix: string): string {
   const slash = path.lastIndexOf('/');
@@ -67,7 +69,7 @@ export function assemble(entries: FileEntry[]): AssemblyPlan {
       warnings.push(`Path collision resolved: "${f.path}" written as "${path}".`);
     }
     taken.add(path);
-    files.push({ ...f, path, renamed: f.renamed || path !== f.originalPath });
+    files.push({ ...f, path, renamed: !!f.renamed || path !== f.originalPath });
   };
 
   const sorted = [...entries].sort((x, y) => x.relPath.localeCompare(y.relPath));
@@ -75,11 +77,17 @@ export function assemble(entries: FileEntry[]): AssemblyPlan {
   for (const e of sorted) {
     const d = e.decision;
 
+    /* ------------------------------------------------------------ exclude */
     if (d.kind === 'exclude') {
-      excluded.push({ entryId: e.id, relPath: e.relPath, reason: e.note?.trim() || 'Excluded by decision' });
+      excluded.push({
+        entryId: e.id,
+        relPath: e.relPath,
+        reason: e.note?.trim() || 'Excluded by decision',
+      });
       continue;
     }
 
+    /* -------------------------------------------------------- take A or B */
     if (d.kind === 'takeA' || d.kind === 'takeB') {
       const side: Side = d.kind === 'takeA' ? 'A' : 'B';
       const blob = side === 'A' ? e.a : e.b;
@@ -94,6 +102,7 @@ export function assemble(entries: FileEntry[]): AssemblyPlan {
       continue;
     }
 
+    /* ---------------------------------------------------------- keep both */
     if (d.kind === 'keepBoth') {
       if (!e.a || !e.b) {
         errors.push(`${e.relPath}: "keep both" needs the file on both sides. Skipped.`);
@@ -115,6 +124,26 @@ export function assemble(entries: FileEntry[]): AssemblyPlan {
       continue;
     }
 
+    /* ------------------------------------------------- Phase 3: hunk merge */
+    if (d.kind === 'hunks') {
+      if (!canHunkMerge(e) || !e.a || !e.b) {
+        errors.push(`${e.relPath}: hunk merge needs decodable text on both sides. Skipped.`);
+        continue;
+      }
+      const aText = e.a.text ?? '';
+      const bText = e.b.text ?? '';
+      // Same cache the UI used, so hunk indices are guaranteed to line up.
+      const diff = getExactDiff(diffKey(e.id, e.a.hash, e.b.hash), aText, bText);
+      const content = composeMerge(diff.segments, d.picks, wantsTrailingNewline(aText, bText));
+      const bytes = new TextEncoder().encode(content);
+      push({
+        path: e.relPath, from: 'merged', originalPath: e.relPath,
+        entryId: e.id, size: bytes.byteLength, bytes,
+      });
+      continue;
+    }
+
+    /* ----------------------------------------------- Phase 3: manual edit */
     if (d.kind === 'manual') {
       const bytes = new TextEncoder().encode(d.content);
       push({
@@ -123,9 +152,6 @@ export function assemble(entries: FileEntry[]): AssemblyPlan {
       });
       continue;
     }
-
-    // d.kind === 'hunks' — Phase 3
-    errors.push(`${e.relPath}: hunk-level merging is not implemented yet. Skipped.`);
   }
 
   const stats = {

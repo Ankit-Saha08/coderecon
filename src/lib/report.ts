@@ -1,5 +1,6 @@
 import type { FileEntry, ScanOptions } from '@/types';
 import type { AssemblyPlan } from './assemble';
+import { diffKey, getExactDiff, summarizePicks } from './diff';
 import { computeStats } from './stats';
 import { STATUS_META } from './statusMeta';
 import { formatBytes } from './text';
@@ -19,9 +20,13 @@ const describe = (e: FileEntry): string => {
     case 'takeA':    return 'Keep A';
     case 'takeB':    return 'Keep B';
     case 'keepBoth': return `Keep both (${d.renameSide} → *${d.suffix}.*)`;
-    case 'manual':   return 'Manual edit';
-    case 'hunks':    return 'Hunk merge';
+    case 'manual':   return `Manual edit (${d.content.split('\n').length} lines)`;
     case 'exclude':  return 'Excluded';
+    case 'hunks': {
+      const picks = Object.values(d.picks);
+      const c = (k: string) => picks.filter((x) => x === k).length;
+      return `Hunk merge (${c('A')}×A, ${c('B')}×B, ${c('both')}×both, ${c('none')}×drop)`;
+    }
   }
 };
 
@@ -58,7 +63,7 @@ export function buildMarkdownReport(ctx: Ctx): string {
   L.push(`| Files written | ${plan.files.length} |`);
   L.push(`| Taken from A | ${plan.stats.fromA} |`);
   L.push(`| Taken from B | ${plan.stats.fromB} |`);
-  L.push(`| Manually merged | ${plan.stats.merged} |`);
+  L.push(`| Composed (merged / manual) | ${plan.stats.merged} |`);
   L.push(`| Renamed (keep both / collision) | ${plan.stats.renamed} |`);
   L.push(`| Excluded | ${plan.stats.excluded} |`);
   L.push(`| Total size | ${formatBytes(plan.stats.totalBytes)} |`);
@@ -87,6 +92,30 @@ export function buildMarkdownReport(ctx: Ctx): string {
         `${e.a ? formatBytes(e.a.size) : '—'} | ${e.b ? formatBytes(e.b.size) : '—'} | ` +
         `${esc(e.note?.trim() ?? '')} |`,
       );
+    }
+    L.push('');
+  }
+
+  /* ------------------------------------------------- Phase 3: merged files */
+  const merged = entries.filter(
+    (e) => e.decision.kind === 'hunks' || e.decision.kind === 'manual',
+  );
+  if (merged.length) {
+    L.push(`## Composed files (${merged.length})`, '');
+    L.push(`> These files exist in neither A nor B in this exact form. They were assembled here, and are written as UTF-8.`, '');
+    L.push(`| Path | Method | Composition | Note |`, `| --- | --- | --- | --- |`);
+    for (const e of merged) {
+      let composition = '—';
+      let method = 'Manual edit';
+      if (e.decision.kind === 'hunks' && e.a && e.b) {
+        method = 'Hunk merge';
+        const d = getExactDiff(diffKey(e.id, e.a.hash, e.b.hash), e.a.text ?? '', e.b.text ?? '');
+        const p = summarizePicks(d.segments, e.decision.picks);
+        composition = `${p.total} hunks → ${p.A} from A, ${p.B} from B, ${p.both} both, ${p.none} dropped`;
+      } else if (e.decision.kind === 'manual') {
+        composition = `${e.decision.content.split('\n').length} lines, hand-written`;
+      }
+      L.push(`| \`${esc(e.relPath)}\` | ${method} | ${composition} | ${esc(e.note?.trim() ?? '')} |`);
     }
     L.push('');
   }
